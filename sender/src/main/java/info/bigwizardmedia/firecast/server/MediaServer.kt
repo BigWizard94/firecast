@@ -62,7 +62,7 @@ class MediaServer(port: Int = 8080) : NanoHTTPD(port) {
                 res.addHeader("Content-Length", count.toString())
                 return res
             }
-            val res = newFixedLengthResponse(Status.REQUESTED_RANGE_NOT_SATISFIABLE, "text/plain", "")
+            val res = newFixedLengthResponse(Status.RANGE_NOT_SATISFIABLE, "text/plain", "")
             res.addHeader("Content-Range", "bytes */$length")
             return res
         }
