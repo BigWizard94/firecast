@@ -64,7 +64,7 @@ dependencies {
     // Embedded LAN HTTP server for local files (PROTOCOL.md §7).
     // NanoHTTPD chosen over Ktor: a single ~100KB jar with zero transitive
     // dependencies — more than enough for static file serving with Range support.
-    implementation("org.nanohttpd:nanohttpd:2.3.2")
+    implementation("org.nanohttpd:nanohttpd:2.3.1")
     // JSON for the wire protocol
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
 
