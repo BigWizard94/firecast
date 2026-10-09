@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">FireCast</string>
+    <string name="devices_title">FireCast — Receivers</string>
+    <string name="now_playing_title">Now Playing</string>
+</resources>

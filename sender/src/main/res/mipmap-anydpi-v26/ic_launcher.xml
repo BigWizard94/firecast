@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@android:color/black" />
+    <foreground>
+        <vector
+            android:width="108dp"
+            android:height="108dp"
+            android:viewportWidth="108"
+            android:viewportHeight="108">
+            <!-- Stylized flame / cast glyph placeholder -->
+            <path
+                android:fillColor="#FF6D00"
+                android:pathData="M54,20 C54,20 30,44 30,66 C30,82 40,92 54,92 C68,92 78,82 78,66 C78,44 54,20 54,20 Z" />
+            <path
+                android:fillColor="#FFD54F"
+                android:pathData="M54,48 C54,48 42,60 42,70 C42,78 47,84 54,84 C61,84 66,78 66,70 C66,60 54,48 54,48 Z" />
+        </vector>
+    </foreground>
+</adaptive-icon>
