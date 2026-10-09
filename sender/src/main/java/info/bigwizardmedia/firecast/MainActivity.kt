@@ -46,8 +46,8 @@ class MainActivity : ComponentActivity() {
 
     /**
      * Share-sheet / open-with entry points:
-     * - ACTION_SEND with video/* → the shared file/stream Uri
-     * - ACTION_VIEW with video/* or http(s) → file Uri or remote URL
+     * - ACTION_SEND with a shared video file or stream
+     * - ACTION_VIEW with a video file or an http(s) link
      * The media is stashed as pending and auto-plays once a receiver connects.
      */
     private fun handleIntent(intent: Intent?) {

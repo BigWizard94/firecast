@@ -1,6 +1,7 @@
 package info.bigwizardmedia.firecast.server
 
 import fi.iki.elonen.NanoHTTPD
+import fi.iki.elonen.NanoHTTPD.Response.Status
 import java.io.File
 import java.io.FileInputStream
 import java.net.NetworkInterface

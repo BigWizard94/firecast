@@ -131,7 +131,9 @@ class DiscoveryManager(private val context: Context) {
         val discoveryListener = object : NsdManager.DiscoveryListener {
             override fun onDiscoveryStarted(regType: String) = Unit
             override fun onDiscoveryStopped(serviceType: String) = Unit
-            override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) = close()
+            override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
+                close()
+            }
             override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) = Unit
             override fun onServiceFound(service: NsdServiceInfo) {
                 nsdManager.resolveService(service, object : NsdManager.ResolveListener {
