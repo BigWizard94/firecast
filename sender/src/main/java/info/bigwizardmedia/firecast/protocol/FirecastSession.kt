@@ -37,10 +37,9 @@ import java.util.concurrent.TimeUnit
  * matching [sendCommand] call by id.
  */
 class FirecastSession(
-    private val wsUrl: String,
     parentScope: CoroutineScope,
     private val clientName: String = "FireCast Android",
-    private val clientVersion: String = "0.1.0",
+    private val clientVersion: String = "0.2.0",
 ) {
     enum class ConnectionState { DISCONNECTED, CONNECTING, CONNECTED, PAIRING_REQUIRED, FAILED }
 
@@ -51,7 +50,7 @@ class FirecastSession(
         .build()
     private val pending = ConcurrentHashMap<String, CompletableDeferred<JsonObject>>()
 
-    private var socket: WebSocket? = null
+    private var conn: WsConnection? = null
     private var keepaliveJob: Job? = null
 
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
@@ -66,11 +65,39 @@ class FirecastSession(
     @Volatile
     var fingerprint: String = ""
 
-    fun connect(fingerprint: String) {
+    /**
+     * Client mode: dial out to a native receiver's WebSocket URL.
+     */
+    fun connectTo(wsUrl: String, fingerprint: String) {
         this.fingerprint = fingerprint
         _connectionState.value = ConnectionState.CONNECTING
         val request = Request.Builder().url(wsUrl).build()
-        socket = client.newWebSocket(request, Listener())
+        val ws = client.newWebSocket(request, Listener())
+        conn = object : WsConnection {
+            override fun send(text: String): Boolean = try {
+                ws.send(text)
+            } catch (_: Exception) {
+                false
+            }
+
+            override fun close() {
+                try {
+                    ws.close(1000, "bye")
+                } catch (_: Exception) {
+                }
+            }
+        }
+    }
+
+    /**
+     * Server mode: adopt a WebSocket the receiver opened to us
+     * (web receiver via CastControlServer). The protocol flow after this
+     * point is identical to client mode: we still send `hello` first.
+     */
+    fun accept(incoming: WsConnection, fingerprint: String) {
+        this.fingerprint = fingerprint
+        conn = incoming
+        onConnected()
     }
 
     suspend fun hello(): JsonObject? {
@@ -129,7 +156,7 @@ class FirecastSession(
         val (id, text) = newCommand(type, payload)
         val deferred = CompletableDeferred<JsonObject>()
         pending[id] = deferred
-        val sent = socket?.send(text) == true
+        val sent = conn?.send(text) == true
         if (!sent) {
             pending.remove(id)
             return null
@@ -145,41 +172,56 @@ class FirecastSession(
     fun close() {
         keepaliveJob?.cancel()
         try {
-            socket?.close(1000, "bye")
+            conn?.close()
         } catch (_: Exception) {
         }
-        socket = null
+        conn = null
         pending.values.forEach { it.cancel() }
         pending.clear()
         _connectionState.value = ConnectionState.DISCONNECTED
         scope.cancel()
     }
 
+    /** Called when the underlying transport reports the channel is open. */
+    private fun onConnected() {
+        _connectionState.value = ConnectionState.CONNECTED
+        startKeepalive()
+    }
+
+    /** Called with each incoming text frame. */
+    fun onText(text: String) {
+        scope.launch { handleMessage(text) }
+    }
+
+    /** Called when the transport closes or fails. */
+    private fun onTransportClosed(failed: Boolean, error: Throwable? = null) {
+        if (failed) {
+            _lastError.value = error?.message ?: "connection failed"
+        }
+        if (_connectionState.value == ConnectionState.CONNECTING) {
+            _connectionState.value = ConnectionState.FAILED
+        } else {
+            _connectionState.value = ConnectionState.DISCONNECTED
+        }
+        pending.values.forEach { it.cancel() }
+        pending.clear()
+    }
+
     private inner class Listener : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
-            _connectionState.value = ConnectionState.CONNECTED
-            startKeepalive()
+            onConnected()
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
-            scope.launch { handleMessage(text) }
+            onText(text)
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-            _lastError.value = t.message ?: "connection failed"
-            if (_connectionState.value == ConnectionState.CONNECTING) {
-                _connectionState.value = ConnectionState.FAILED
-            } else {
-                _connectionState.value = ConnectionState.DISCONNECTED
-            }
-            pending.values.forEach { it.cancel() }
-            pending.clear()
+            onTransportClosed(failed = true, error = t)
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-            _connectionState.value = ConnectionState.DISCONNECTED
-            pending.values.forEach { it.cancel() }
-            pending.clear()
+            onTransportClosed(failed = false)
         }
     }
 
@@ -204,7 +246,7 @@ class FirecastSession(
 
         // Unsolicited events (no id).
         when (type) {
-            "ping" -> socket?.send(newEvent("pong"))
+            "ping" -> conn?.send(newEvent("pong"))
             "status" -> obj["payload"]?.jsonObject?.let { _status.value = parseStatus(it) }
             "position" -> {
                 val p = obj["payload"]?.jsonObject ?: return
@@ -240,7 +282,7 @@ class FirecastSession(
         keepaliveJob = scope.launch {
             while (true) {
                 delay(FirecastProtocol.KEEPALIVE_SECONDS * 1000)
-                val s = socket ?: break
+                val s = conn ?: break
                 try {
                     s.send(newEvent("ping"))
                 } catch (_: Exception) {

@@ -36,8 +36,20 @@ class MediaServer(port: Int = 8080) : NanoHTTPD(port) {
     /** Full media URL for a token, using this device's LAN IP. */
     fun mediaUrl(token: String): String = "http://${lanIp()}:$listeningPort/media/$token"
 
+    /** Receiver web page HTML (set from assets at startup); served at `/`. */
+    @Volatile
+    var receiverPageHtml: String? = null
+
+    /** LAN URL of the receiver page, e.g. `http://192.168.1.5:8080/`. */
+    fun receiverPageUrl(): String = "http://${lanIp()}:$listeningPort/"
+
     override fun serve(session: IHTTPSession): Response {
         val uri = session.uri
+        if (uri == "/" || uri == "/index.html") {
+            val html = receiverPageHtml
+                ?: return newFixedLengthResponse(Status.NOT_FOUND, "text/plain", "not found")
+            return newFixedLengthResponse(Status.OK, "text/html", html)
+        }
         if (!uri.startsWith("/media/")) {
             return newFixedLengthResponse(Status.NOT_FOUND, "text/plain", "not found")
         }

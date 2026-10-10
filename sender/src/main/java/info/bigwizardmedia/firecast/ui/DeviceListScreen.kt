@@ -39,10 +39,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import info.bigwizardmedia.firecast.discovery.DiscoverySource
 import info.bigwizardmedia.firecast.discovery.ReceiverDevice
+import info.bigwizardmedia.firecast.protocol.FirecastSession
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -54,13 +56,34 @@ fun DeviceListScreen(
     val devices by vm.devices.collectAsState()
     val scanning by vm.scanning.collectAsState()
     val notice by vm.notice.collectAsState()
+    val hosting by vm.hosting.collectAsState()
+    val receiverUrl by vm.receiverUrl.collectAsState()
+    val connectedDevice by vm.connectedDevice.collectAsState()
+    val connectionState by vm.connectionState.collectAsState()
+    val pinRequired by vm.pinRequired.collectAsState()
     val snackbar = remember { SnackbarHostState() }
 
     var manualHost by remember { mutableStateOf("") }
     var manualPort by remember { mutableStateOf("8090") }
     var urlField by remember { mutableStateOf("") }
+    var autoNavFor by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(Unit) { vm.startScan() }
+    LaunchedEffect(Unit) {
+        vm.startScan()
+        vm.startHosting()
+    }
+    // The TV's browser receiver dials in to us — take the user to Now Playing
+    // as soon as pairing starts (PIN entry lives there) or completes.
+    LaunchedEffect(connectedDevice?.id, pinRequired) {
+        val dev = connectedDevice
+        if (pinRequired && autoNavFor != "pin") {
+            autoNavFor = "pin"
+            onDeviceChosen()
+        } else if (dev != null && dev.name == "TV Receiver" && autoNavFor != dev.id) {
+            autoNavFor = dev.id
+            onDeviceChosen()
+        }
+    }
     LaunchedEffect(notice) {
         notice?.let { snackbar.showSnackbar(it); vm.clearNotice() }
     }
@@ -89,8 +112,55 @@ fun DeviceListScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            // Web receiver: the TV's browser dials in — no app install needed.
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Filled.Tv, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "TV Receiver — no install needed",
+                            style = MaterialTheme.typography.titleMedium,
+                        )
+                    }
+                    if (hosting && receiverUrl != null) {
+                        Text(
+                            "On your Fire TV Stick, open the Silk browser and go to:",
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                        Text(
+                            receiverUrl!!,
+                            style = MaterialTheme.typography.titleLarge,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                        Text(
+                            "Then press OK on the TV remote. " +
+                                "Enter the PIN it shows here to pair.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        val tvUp = connectedDevice?.name == "TV Receiver" &&
+                            connectionState == FirecastSession.ConnectionState.CONNECTED
+                        Text(
+                            if (tvUp) "✓ TV connected and ready"
+                            else "Waiting for the TV browser…",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (tvUp) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    } else {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(modifier = Modifier.padding(end = 12.dp))
+                            Text("Starting receiver hosting…")
+                        }
+                    }
+                }
+            }
+
             Text(
-                "Pick a TV on your Wi-Fi, then cast. Receivers appear automatically via DIAL/mDNS.",
+                "Or pick a receiver app below (native TV apps, when installed).",
                 style = MaterialTheme.typography.bodyMedium,
             )
 

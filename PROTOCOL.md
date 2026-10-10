@@ -6,8 +6,13 @@ One phone sender app must drive two receivers with zero protocol changes:
 
 - **Vega OS receiver** — Amazon Appstore app for Fire TV Stick 4K Select / 3rd-gen 4K (React Native + native player module)
 - **Fire OS receiver** — sideloadable APK for Fire OS sticks (ExoPlayer)
+- **Web receiver** — zero-install fallback: a page opened in the TV's browser (e.g. Silk on Vega) that dials the sender
 
-Everything below is transport + message semantics. Nothing here is Android-, Vega-, or player-specific.
+**Transport direction:** the WebSocket is always JSON message frames as defined below,
+but *either side may perform the TCP dial*. Native receivers listen and the sender
+dials out (classic); the web receiver dials in to a control server hosted by the
+sender. Protocol roles never change: the sender always sends `hello` first and
+issues commands; the receiver always executes and emits status.
 
 ---
 
@@ -53,6 +58,15 @@ The WebSocket URL is `ws://<resolved-host>:<port><ws-path>`.
 ### 1c. Manual entry
 
 Sender MUST allow typing an IP address or hostname plus port, then attempt the WebSocket handshake directly (`ws://host:port/firecast`).
+
+### 1d. Web receiver (no-install fallback)
+
+For TVs whose browser can reach the phone over LAN (e.g. a Vega Fire TV Stick
+via Silk): the sender hosts the receiver page at `http://<phone-lan-ip>:8080/`
+and a WebSocket control server at `ws://<phone-lan-ip>:8081/firecast`. The user
+opens the page URL in the TV browser; the page dials the control server and the
+protocol proceeds exactly as below — the sender still sends `hello` first.
+Only the TCP dial direction is inverted, never the protocol roles.
 
 ---
 

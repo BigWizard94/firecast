@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FireCast Receiver</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 100%; height: 100%; background: #000; overflow: hidden;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #fff; }
+  #v { position: fixed; inset: 0; width: 100%; height: 100%; background: #000; }
+  .screen { position: fixed; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; text-align: center;
+    background: radial-gradient(ellipse at center, #1a1030 0%, #000 75%);
+    padding: 5vh 5vw; z-index: 10; }
+  .hidden { display: none !important; }
+  .logo { font-size: 7vh; font-weight: 800; letter-spacing: 0.08em;
+    background: linear-gradient(90deg, #a855f7, #2dd4bf);
+    -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .sub { margin-top: 2vh; font-size: 2.6vh; color: #c4b5fd; }
+  .hint { margin-top: 4vh; font-size: 2.4vh; color: #9ca3af; max-width: 70vw; line-height: 1.6; }
+  .pin { margin-top: 3vh; font-size: 12vh; font-weight: 800; letter-spacing: 0.25em;
+    color: #fff; text-shadow: 0 0 4vh rgba(168,85,247,.8); font-variant-numeric: tabular-nums; }
+  .spinner { margin-top: 3vh; width: 6vh; height: 6vh; border: 0.8vh solid #333;
+    border-top-color: #a855f7; border-radius: 50%; animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 5;
+    padding: 2.5vh 4vw calc(2.5vh + env(safe-area-inset-bottom));
+    background: linear-gradient(transparent, rgba(0,0,0,.85)); }
+  #title { font-size: 3vh; font-weight: 600; white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; }
+  #tstate { margin-top: 1vh; font-size: 2.2vh; color: #c4b5fd; }
+  #toast { position: fixed; top: 4vh; left: 50%; transform: translateX(-50%); z-index: 20;
+    background: rgba(20,10,40,.92); border: 1px solid #a855f7; border-radius: 1.5vh;
+    padding: 1.8vh 3vw; font-size: 2.4vh; }
+</style>
+</head>
+<body>
+<video id="v" playsinline></video>
+
+<div id="splash" class="screen">
+  <div class="logo">FireCast</div>
+  <div class="sub">TV Receiver</div>
+  <div class="hint">Press <b>OK</b> on your remote to enable casting.<br>
+    Then use the FireCast app on your phone to cast videos here.</div>
+</div>
+
+<div id="wait" class="screen hidden">
+  <div class="logo">FireCast</div>
+  <div class="sub" id="waitmsg">Waiting for your phone…</div>
+  <div class="spinner" id="waitspin"></div>
+</div>
+
+<div id="pinScreen" class="screen hidden">
+  <div class="logo">FireCast</div>
+  <div class="sub">Enter this PIN in the FireCast app on your phone:</div>
+  <div class="pin" id="pinDigits">––––</div>
+</div>
+
+<div id="bar" class="hidden">
+  <div id="title"></div>
+  <div id="tstate"></div>
+</div>
+<div id="toast" class="hidden"></div>
+
+<script>
+(function () {
+  "use strict";
+  var video = document.getElementById('v');
+  var splash = document.getElementById('splash');
+  var wait = document.getElementById('wait');
+  var waitmsg = document.getElementById('waitmsg');
+  var pinScreen = document.getElementById('pinScreen');
+  var pinDigits = document.getElementById('pinDigits');
+  var bar = document.getElementById('bar');
+  var titleEl = document.getElementById('title');
+  var tstate = document.getElementById('tstate');
+  var toast = document.getElementById('toast');
+
+  var WS_PORT = 8081;
+  var ws = null;
+  var unlocked = false;
+  var pin = null;
+  var lastFp = null;
+  var currentTitle = '';
+  var pendingPlay = null;
+  var posTimer = null;
+  var paired = [];
+  try { paired = JSON.parse(localStorage.getItem('fc_paired') || '[]'); } catch (e) {}
+
+  function show(el) { el.classList.remove('hidden'); }
+  function hide(el) { el.classList.add('hidden'); }
+  function showToast(msg, ms) {
+    toast.textContent = msg; show(toast);
+    setTimeout(function () { hide(toast); }, ms || 4000);
+  }
+
+  // ---------- UI states ----------
+  function uiIdle(msg) {
+    hide(splash); hide(pinScreen); hide(bar);
+    waitmsg.textContent = msg || 'Waiting for your phone…';
+    show(wait);
+  }
+
+  // ---------- WebSocket ----------
+  function wsUrl() { return 'ws://' + location.hostname + ':' + WS_PORT + '/firecast'; }
+
+  function connect() {
+    try { ws = new WebSocket(wsUrl()); } catch (e) { retry(); return; }
+    ws.onopen = function () { uiIdle('Waiting for your phone…'); };
+    ws.onmessage = function (ev) {
+      var m;
+      try { m = JSON.parse(ev.data); } catch (e) { return; }
+      handle(m);
+    };
+    ws.onclose = function () { retry(); };
+    ws.onerror = function () { try { ws.close(); } catch (e) {} };
+  }
+  function retry() {
+    uiIdle('Connection lost — retrying…');
+    setTimeout(connect, 3000);
+  }
+  function send(obj) {
+    if (ws && ws.readyState === 1) { ws.send(JSON.stringify(obj)); }
+  }
+
+  // ---------- protocol ----------
+  function handle(m) {
+    var type = m.type, id = m.id, p = m.payload || {};
+    if (type === 'hello') {
+      lastFp = p.fingerprint || null;
+      var isPaired = lastFp && paired.indexOf(lastFp) >= 0;
+      if (!isPaired) {
+        pin = String(Math.floor(1000 + Math.random() * 9000));
+        pinDigits.textContent = pin;
+        hide(wait); hide(splash); show(pinScreen);
+      } else {
+        hide(pinScreen);
+      }
+      send({ v: 1, id: id, type: 'hello_result', payload: {
+        ok: true, paired: !!isPaired, receiver: 'FireCast Web',
+        receiver_version: '0.2.0', protocol: 1 } });
+    } else if (type === 'pair') {
+      var ok = !!pin && p.pin === pin;
+      if (ok) {
+        if (lastFp && paired.indexOf(lastFp) < 0) {
+          paired.push(lastFp);
+          try { localStorage.setItem('fc_paired', JSON.stringify(paired)); } catch (e) {}
+        }
+        pin = null; hide(pinScreen); uiIdle('Paired! Pick something to cast.');
+      }
+      send({ v: 1, id: id, type: 'pair_result',
+        payload: ok ? { ok: true } : { ok: false, error: 'bad_pin' } });
+    } else if (type === 'play') {
+      doPlay(p).then(function (ok) {
+        send({ v: 1, id: id, type: 'play_result',
+          payload: ok ? { ok: true } : { ok: false, error: 'unplayable' } });
+      });
+    } else if (type === 'pause') {
+      video.pause();
+      send({ v: 1, id: id, type: 'pause_result', payload: { ok: true } });
+      sendStatus();
+    } else if (type === 'resume') {
+      ensurePlay().then(function () {
+        send({ v: 1, id: id, type: 'resume_result', payload: { ok: true } });
+        sendStatus();
+      });
+    } else if (type === 'stop') {
+      stopPlayback();
+      send({ v: 1, id: id, type: 'stop_result', payload: { ok: true } });
+    } else if (type === 'seek') {
+      try { video.currentTime = Math.max(0, p.position || 0); } catch (e) {}
+      send({ v: 1, id: id, type: 'seek_result', payload: { ok: true } });
+      sendStatus();
+    } else if (type === 'volume') {
+      var lvl = Math.min(1, Math.max(0, p.level == null ? 1 : p.level));
+      video.volume = lvl;
+      if (lvl > 0) video.muted = false;
+      send({ v: 1, id: id, type: 'volume_result', payload: { ok: true } });
+      sendStatus();
+    } else if (type === 'mute') {
+      video.muted = !!p.muted;
+      send({ v: 1, id: id, type: 'mute_result', payload: { ok: true } });
+      sendStatus();
+    } else if (type === 'get_status') {
+      send({ v: 1, id: id, type: 'get_status_result', payload: statusPayload() });
+    } else if (type === 'ping') {
+      send({ v: 1, type: 'pong' });
+    }
+    // Unknown types ignored (forward compatibility).
+  }
+
+  // ---------- playback ----------
+  function ensurePlay() {
+    try {
+      var r = video.play();
+      if (r && r.catch) {
+        return r.catch(function (e) {
+          if (e && e.name === 'NotAllowedError') {
+            showToast('Press OK on your remote to allow playback', 6000);
+          }
+          return Promise.resolve();
+        });
+      }
+      return Promise.resolve();
+    } catch (e) { return Promise.resolve(); }
+  }
+
+  function doPlay(p) {
+    return new Promise(function (resolve) {
+      stopPosTimer();
+      hide(wait); hide(pinScreen); hide(splash);
+      currentTitle = p.title || 'Casting…';
+      titleEl.textContent = currentTitle;
+      tstate.textContent = 'Loading…';
+      show(bar);
+      var done = false;
+      function finish(ok) {
+        if (done) return; done = true;
+        video.removeEventListener('playing', onPlaying);
+        video.removeEventListener('error', onError);
+        if (ok) { startPosTimer(); }
+        sendStatus();
+        resolve(ok);
+      }
+      function onPlaying() { finish(true); }
+      function onError() {
+        sendEvent('error', { code: 'fetch_failed', message: 'Could not load that media.' });
+        finish(false);
+      }
+      video.addEventListener('playing', onPlaying);
+      video.addEventListener('error', onError);
+      setTimeout(function () { finish(!video.error); }, 20000);
+      try {
+        video.src = p.url;
+        if (p.position) { try { video.currentTime = p.position; } catch (e) {} }
+        var r = video.play();
+        if (r && r.catch) {
+          r.catch(function (e) {
+            if (e && e.name === 'NotAllowedError') {
+              pendingPlay = p;
+              showToast('Press OK on your remote to start playback', 6000);
+              finish(true);
+            }
+          });
+        }
+      } catch (e) { finish(false); }
+    });
+  }
+
+  function stopPlayback() {
+    stopPosTimer();
+    try { video.pause(); } catch (e) {}
+    try { video.removeAttribute('src'); video.load(); } catch (e) {}
+    currentTitle = '';
+    hide(bar); uiIdle('Stopped. Pick something else to cast.');
+    sendStatus();
+  }
+
+  video.addEventListener('ended', function () {
+    stopPosTimer();
+    sendEvent('ended', {});
+    sendStatus();
+  });
+  video.addEventListener('pause', sendStatusThrottled);
+  video.addEventListener('play', sendStatusThrottled);
+
+  var statusT = null;
+  function sendStatusThrottled() {
+    if (statusT) return;
+    statusT = setTimeout(function () { statusT = null; sendStatus(); }, 300);
+  }
+
+  function videoState() {
+    if (video.error) return 'error';
+    if (video.ended) return 'ended';
+    if (video.paused) return video.currentTime > 0 ? 'paused' : 'idle';
+    if (video.readyState < 3) return 'buffering';
+    return 'playing';
+  }
+  function statusPayload() {
+    return {
+      state: videoState(),
+      position: video.currentTime || 0,
+      duration: isFinite(video.duration) ? video.duration : -1,
+      volume: video.volume, muted: video.muted, title: currentTitle
+    };
+  }
+  function sendStatus() {
+    send({ v: 1, type: 'status', payload: statusPayload() });
+    var st = videoState();
+    tstate.textContent = st.charAt(0).toUpperCase() + st.slice(1);
+  }
+  function sendEvent(type, payload) { send({ v: 1, type: type, payload: payload }); }
+
+  function startPosTimer() {
+    stopPosTimer();
+    posTimer = setInterval(function () {
+      if (!video.paused && !video.ended) {
+        send({ v: 1, type: 'position', payload: {
+          position: video.currentTime || 0,
+          duration: isFinite(video.duration) ? video.duration : -1 } });
+      }
+    }, 1000);
+  }
+  function stopPosTimer() {
+    if (posTimer) { clearInterval(posTimer); posTimer = null; }
+  }
+
+  // ---------- remote / keyboard ----------
+  function unlock() {
+    if (!unlocked) {
+      unlocked = true;
+      hide(splash);
+      uiIdle('Waiting for your phone…');
+    } else {
+      hide(toast);
+    }
+    if (pendingPlay) { var p = pendingPlay; pendingPlay = null; doPlay(p); }
+  }
+  document.addEventListener('keydown', function (e) {
+    var k = e.keyCode;
+    if (!unlocked) { unlock(); e.preventDefault(); return; }
+    if (k === 13 || k === 32) { // OK / center
+      if (pendingPlay) { unlock(); }
+      else if (video.paused) { ensurePlay(); } else { video.pause(); }
+      e.preventDefault();
+    } else if (k === 37) { try { video.currentTime = Math.max(0, video.currentTime - 10); } catch (e2) {} }
+    else if (k === 39) { try { video.currentTime = video.currentTime + 10; } catch (e2) {} }
+    else if (k === 38) { video.volume = Math.min(1, video.volume + 0.1); e.preventDefault(); }
+    else if (k === 40) { video.volume = Math.max(0, video.volume - 0.1); e.preventDefault(); }
+  });
+  document.addEventListener('click', unlock);
+
+  uiIdle('Loading…');
+  connect();
+})();
+</script>
+</body>
+</html>

@@ -9,10 +9,15 @@ import androidx.lifecycle.viewModelScope
 import info.bigwizardmedia.firecast.ServiceLocator
 import info.bigwizardmedia.firecast.discovery.DialClient
 import info.bigwizardmedia.firecast.discovery.DiscoveryManager
+import info.bigwizardmedia.firecast.discovery.DiscoverySource
 import info.bigwizardmedia.firecast.discovery.ReceiverDevice
 import info.bigwizardmedia.firecast.protocol.FirecastSession
 import info.bigwizardmedia.firecast.protocol.PlaybackState
 import info.bigwizardmedia.firecast.protocol.ReceiverStatus
+import info.bigwizardmedia.firecast.protocol.WsConnection
+import info.bigwizardmedia.firecast.server.CastControlServer
+import info.bigwizardmedia.firecast.server.MediaServer
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -41,6 +46,14 @@ class CastViewModel(app: Application) : AndroidViewModel(app) {
 
     private val discovery: DiscoveryManager = ServiceLocator.discovery
     private val mediaServer get() = ServiceLocator.mediaServer
+    private val controlServer get() = ServiceLocator.controlServer
+
+    private val _hosting = MutableStateFlow(false)
+    val hosting: StateFlow<Boolean> = _hosting.asStateFlow()
+
+    /** LAN URL of the TV receiver page, e.g. http://192.168.1.5:8080/ */
+    private val _receiverUrl = MutableStateFlow<String?>(null)
+    val receiverUrl: StateFlow<String?> = _receiverUrl.asStateFlow()
 
     private val _devices = MutableStateFlow<List<ReceiverDevice>>(emptyList())
     val devices: StateFlow<List<ReceiverDevice>> = _devices.asStateFlow()
@@ -72,6 +85,10 @@ class CastViewModel(app: Application) : AndroidViewModel(app) {
     private var sessionJob: Job? = null
     private var scanJob: Job? = null
     private var serverStarted = false
+
+    // Web-receiver hosting (server mode): the TV dials in to us.
+    private var hostSession: FirecastSession? = null
+    private val hostChannels = mutableMapOf<WsConnection, FirecastSession>()
 
     // ---------- discovery ----------
 
@@ -121,6 +138,57 @@ class CastViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // ---------- web-receiver hosting (server mode) ----------
+
+    /**
+     * Starts the LAN servers the TV's browser receiver needs:
+     * media + receiver page over HTTP (8080) and the control channel
+     * WebSocket server (8081). Idempotent.
+     */
+    fun startHosting() {
+        if (_hosting.value) return
+        viewModelScope.launch {
+            try {
+                val html = getApplication<Application>().assets
+                    .open("receiver/index.html").bufferedReader().use { it.readText() }
+                mediaServer.receiverPageHtml = html
+                ensureServer()
+                controlServer.onOpen = { conn -> onReceiverOpen(conn) }
+                controlServer.onMessage = { conn, text -> onReceiverMessage(conn, text) }
+                controlServer.onClose = { conn -> onReceiverClose(conn) }
+                controlServer.listen()
+                _receiverUrl.value = mediaServer.receiverPageUrl()
+                _hosting.value = true
+            } catch (e: Exception) {
+                _notice.value = "Could not start TV receiver hosting: ${e.message}"
+            }
+        }
+    }
+
+    private fun onReceiverOpen(conn: WsConnection) {
+        // Single-receiver v1: the newest TV wins.
+        hostSession?.close()
+        val s = FirecastSession(viewModelScope)
+        hostSession = s
+        hostChannels[conn] = s
+        s.accept(conn, ServiceLocator.fingerprint())
+        beginProtocol(s, displayName = "TV Receiver", device = null)
+    }
+
+    private fun onReceiverMessage(conn: WsConnection, text: String) {
+        hostChannels[conn]?.onText(text)
+    }
+
+    private fun onReceiverClose(conn: WsConnection) {
+        val s = hostChannels.remove(conn) ?: return
+        if (hostSession === s) {
+            hostSession = null
+            if (session === s) disconnect()
+        } else {
+            s.close()
+        }
+    }
+
     // ---------- session ----------
 
     fun connect(device: ReceiverDevice) {
@@ -141,25 +209,39 @@ class CastViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
             }
-            val s = FirecastSession(device.wsUrl, this)
-            session = s
-            sessionJob?.cancel()
-            sessionJob = launch {
-                s.connectionState.collect { _connectionState.value = it }
-            }
-            launch {
-                s.status.collect { _status.value = it }
-            }
-            launch {
-                s.lastError.collect { it?.let { err -> _notice.value = err } }
-            }
-            s.connect(ServiceLocator.fingerprint())
-            // Wait for the socket, then say hello.
+            val s = FirecastSession(viewModelScope)
+            s.connectTo(device.wsUrl, ServiceLocator.fingerprint())
+            beginProtocol(s, displayName = device.name, device = device)
+        }
+    }
+
+    /**
+     * Shared post-connect flow for both modes: wire state collectors, say
+     * hello, and either ask for the TV's PIN or mark the receiver paired.
+     */
+    private fun beginProtocol(
+        s: FirecastSession,
+        displayName: String,
+        device: ReceiverDevice?,
+    ) {
+        session = s
+        sessionJob?.cancel()
+        sessionJob = viewModelScope.launch {
+            s.connectionState.collect { _connectionState.value = it }
+        }
+        viewModelScope.launch {
+            s.status.collect { _status.value = it }
+        }
+        viewModelScope.launch {
+            s.lastError.collect { it?.let { err -> _notice.value = err } }
+        }
+        viewModelScope.launch {
+            // Wait for the channel, then say hello.
             withTimeoutOrNull(10_000) {
                 while (s.connectionState.value == FirecastSession.ConnectionState.CONNECTING) delay(200)
             }
             if (s.connectionState.value != FirecastSession.ConnectionState.CONNECTED) {
-                _notice.value = "Could not reach ${device.name}."
+                _notice.value = "Could not reach $displayName."
                 return@launch
             }
             val hello = s.hello()
@@ -169,7 +251,7 @@ class CastViewModel(app: Application) : AndroidViewModel(app) {
             if (!paired) {
                 _pinRequired.value = true // TV is showing the PIN; ask the user.
             } else {
-                onPaired(device)
+                onPaired(device, displayName)
             }
         }
     }
@@ -179,19 +261,26 @@ class CastViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             if (s.pair(pin.trim())) {
                 _pinRequired.value = false
-                connectingDevice?.let { onPaired(it) }
+                val dev = connectingDevice
+                onPaired(dev, dev?.name ?: "TV Receiver")
             } else {
                 _notice.value = "Wrong PIN — check the TV screen and try again."
             }
         }
     }
 
-    private fun onPaired(device: ReceiverDevice) {
+    private fun onPaired(device: ReceiverDevice?, displayName: String) {
         connectingDevice = null
-        _connectedDevice.value = device
+        // Web receiver dialed in to us: synthesize a device entry for the UI.
+        _connectedDevice.value = device ?: ReceiverDevice(
+            name = displayName,
+            host = MediaServer.lanIp(),
+            wsPort = controlServer.port,
+            source = DiscoverySource.MANUAL,
+        )
         viewModelScope.launch {
             session?.refreshStatus()
-            // Auto-play anything that arrived via share-sheet while picking a device.
+            // Auto-play anything that arrived via share-sheet while pairing.
             pendingMedia?.let { playPending(it) }
         }
     }
@@ -200,6 +289,8 @@ class CastViewModel(app: Application) : AndroidViewModel(app) {
         sessionJob?.cancel()
         session?.close()
         session = null
+        hostSession = null
+        hostChannels.clear()
         connectingDevice = null
         _connectedDevice.value = null
         _pinRequired.value = false
@@ -352,6 +443,18 @@ class CastViewModel(app: Application) : AndroidViewModel(app) {
     override fun onCleared() {
         stopScan()
         disconnect()
+        if (_hosting.value) {
+            viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    controlServer.stop()
+                } catch (_: Exception) {
+                }
+                try {
+                    mediaServer.stop()
+                } catch (_: Exception) {
+                }
+            }
+        }
         super.onCleared()
     }
 }

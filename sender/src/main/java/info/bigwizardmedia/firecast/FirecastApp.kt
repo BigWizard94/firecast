@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Context
 import android.content.SharedPreferences
 import info.bigwizardmedia.firecast.discovery.DiscoveryManager
+import info.bigwizardmedia.firecast.server.CastControlServer
 import info.bigwizardmedia.firecast.server.MediaServer
 import java.util.UUID
 
@@ -23,6 +24,7 @@ object ServiceLocator {
 
     val discovery: DiscoveryManager by lazy { DiscoveryManager(appContext) }
     val mediaServer: MediaServer by lazy { MediaServer() }
+    val controlServer: CastControlServer by lazy { CastControlServer() }
 
     private val prefs: SharedPreferences by lazy {
         appContext.getSharedPreferences("firecast", Context.MODE_PRIVATE)

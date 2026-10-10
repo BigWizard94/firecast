@@ -13,8 +13,8 @@ android {
         applicationId = "info.bigwizardmedia.firecast"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
     }
 
     buildTypes {
@@ -61,6 +61,9 @@ dependencies {
 
     // WebSocket control channel (PROTOCOL.md §3)
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    // WebSocket SERVER for receiver-initiated control (web receiver dials in).
+    // Java-WebSocket: single jar, no transitive deps, Apache-2.0.
+    implementation("org.java-websocket:Java-WebSocket:1.5.7")
     // Embedded LAN HTTP server for local files (PROTOCOL.md §7).
     // NanoHTTPD chosen over Ktor: a single ~100KB jar with zero transitive
     // dependencies — more than enough for static file serving with Range support.
