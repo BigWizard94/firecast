@@ -147,23 +147,32 @@ class CastViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun startHosting() {
         if (_hosting.value) return
-        viewModelScope.launch {
-            try {
-                val html = getApplication<Application>().assets
-                    .open("receiver/index.html").bufferedReader().use { it.readText() }
-                mediaServer.receiverPageHtml = html
-                ensureServer()
-                controlServer.onOpen = { conn -> onReceiverOpen(conn) }
-                controlServer.onMessage = { conn, text -> onReceiverMessage(conn, text) }
-                controlServer.onClose = { conn -> onReceiverClose(conn) }
-                controlServer.listen()
-                _receiverUrl.value = mediaServer.receiverPageUrl()
-                _hosting.value = true
-            } catch (e: Exception) {
-                _notice.value = "Could not start TV receiver hosting: ${e.message}"
-            }
+        viewModelScope.launch { ensureHosting() }
+    }
+
+    /** Starts hosting if needed; returns true when both servers are up. */
+    private suspend fun ensureHosting(): Boolean {
+        if (_hosting.value) return true
+        return try {
+            val html = getApplication<Application>().assets
+                .open("receiver/index.html").bufferedReader().use { it.readText() }
+            mediaServer.receiverPageHtml = html
+            if (!ensureServer()) return false
+            controlServer.onOpen = { conn -> onReceiverOpen(conn) }
+            controlServer.onMessage = { conn, text -> onReceiverMessage(conn, text) }
+            controlServer.onClose = { conn -> onReceiverClose(conn) }
+            controlServer.listen()
+            _receiverUrl.value = mediaServer.receiverPageUrl()
+            _hosting.value = true
+            true
+        } catch (e: Exception) {
+            _notice.value = "Could not start TV receiver hosting: ${e.message}"
+            false
         }
     }
+
+    /** Device name to use for the next dial-in (set when DIAL-launching). */
+    private var pendingDialName: String? = null
 
     private fun onReceiverOpen(conn: WsConnection) {
         // Single-receiver v1: the newest TV wins.
@@ -172,7 +181,9 @@ class CastViewModel(app: Application) : AndroidViewModel(app) {
         hostSession = s
         hostChannels[conn] = s
         s.accept(conn, ServiceLocator.fingerprint())
-        beginProtocol(s, displayName = "TV Receiver", device = null)
+        val name = pendingDialName ?: "TV Receiver"
+        pendingDialName = null
+        beginProtocol(s, displayName = name, device = null)
     }
 
     private fun onReceiverMessage(conn: WsConnection, text: String) {
@@ -198,17 +209,26 @@ class CastViewModel(app: Application) : AndroidViewModel(app) {
         disconnect()
         connectingDevice = device
         viewModelScope.launch {
-            // If the receiver exposes DIAL, make sure the app is running first.
+            // Native receiver via DIAL: it dials in to our control server.
+            // Ensure hosting is up, then launch it with our WS URL as payload.
             device.dialAppUrl?.let { appUrl ->
-                val state = DialClient.getAppState(appUrl)
-                if (state != null && !state.equals("running", ignoreCase = true)) {
-                    DialClient.launch(appUrl)
-                    // Give the receiver a moment to boot its WebSocket.
-                    withTimeoutOrNull(10_000) {
-                        while (DialClient.getAppState(appUrl) != "running") delay(1000)
-                    }
+                if (!ensureHosting()) {
+                    _notice.value = "Could not start receiver hosting."
+                    return@launch
                 }
+                pendingDialName = device.name
+                val payload = "{\"ws_url\":\"${controlServer.wsUrl()}\"}"
+                // (Re-)launch to deliver the payload; the receiver connects back.
+                if (!DialClient.launch(appUrl, payload)) {
+                    _notice.value = "Could not launch ${device.name}."
+                    pendingDialName = null
+                    return@launch
+                }
+                _notice.value = "Launched ${device.name} — waiting for it to connect…"
+                // The session begins when onReceiverOpen fires.
+                return@launch
             }
+            // Manual/mDNS device: classic dial-out to the receiver's WS.
             val s = FirecastSession(viewModelScope)
             s.connectTo(device.wsUrl, ServiceLocator.fingerprint())
             beginProtocol(s, displayName = device.name, device = device)
@@ -379,14 +399,15 @@ class CastViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------- local plumbing ----------
 
-    private fun ensureServer() {
-        if (!serverStarted) {
-            try {
-                mediaServer.start()
-                serverStarted = true
-            } catch (e: Exception) {
-                _notice.value = "Could not start the local media server: ${e.message}"
-            }
+    private fun ensureServer(): Boolean {
+        if (serverStarted) return true
+        return try {
+            mediaServer.start()
+            serverStarted = true
+            true
+        } catch (e: Exception) {
+            _notice.value = "Could not start the local media server: ${e.message}"
+            false
         }
     }
 
