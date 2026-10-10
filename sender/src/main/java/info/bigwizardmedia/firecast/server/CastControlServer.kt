@@ -15,7 +15,7 @@ import java.util.concurrent.ConcurrentHashMap
  * the callbacks below. Signaling runs on Java-WebSocket's own threads — the
  * ViewModel forwards into its coroutine scope.
  */
-class CastControlServer(val port: Int = 8081) : WebSocketServer(InetSocketAddress(port)) {
+class CastControlServer(port: Int = 8081) : WebSocketServer(InetSocketAddress(port)) {
 
     /** A receiver opened the control channel. */
     var onOpen: ((WsConnection) -> Unit)? = null
