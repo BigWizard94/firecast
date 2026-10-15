@@ -1,0 +1,65 @@
+name: Attach APK to release
+
+# Builds the FireCast sender APK in CI and attaches it to an existing
+# GitHub release. Uses the workflow's own GITHUB_TOKEN (which GitHub's
+# release-asset host accepts) instead of a personal token.
+#
+# Trigger manually: Actions -> Attach APK to release -> Run workflow,
+# entering the release tag (e.g. v0.2.1-sender).
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to attach the APK to (e.g. v0.2.1-sender)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-attach:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq unzip
+          mkdir -p "$HOME/android-sdk/cmdline-tools"
+          curl -fsSL https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -o /tmp/cmdline-tools.zip
+          unzip -q /tmp/cmdline-tools.zip -d "$HOME/android-sdk/cmdline-tools"
+          mv "$HOME/android-sdk/cmdline-tools/cmdline-tools" "$HOME/android-sdk/cmdline-tools/latest"
+          export PATH="$HOME/android-sdk/cmdline-tools/latest/bin:$PATH"
+          yes | sdkmanager --licenses > /dev/null
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          echo "ANDROID_HOME=$HOME/android-sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$HOME/android-sdk" >> "$GITHUB_ENV"
+
+      - name: Build sender APK (arm64)
+        run: |
+          chmod +x gradlew
+          ./gradlew :sender:assembleDebug --stacktrace
+
+      - name: Attach APK to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          mkdir -p /tmp/release-assets
+          # TAG looks like v0.2.1-sender -> version v0.2.1, so the attached
+          # asset is named FireCast-sender-v0.2.1-debug.apk
+          VER="${TAG%-sender}"
+          for APK in sender/build/outputs/apk/debug/*.apk; do
+            cp "$APK" "/tmp/release-assets/FireCast-sender-${VER}-debug.apk"
+          done
+          ls -la /tmp/release-assets
+          gh release upload "$TAG" /tmp/release-assets/*.apk --clobber
